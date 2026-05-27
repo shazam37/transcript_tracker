@@ -1,0 +1,816 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Rockwool Claims Tracker</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+<style>
+  :root {
+    --bg:       #0f1117;
+    --surface:  #1a1d27;
+    --border:   #2a2d3a;
+    --text:     #e2e8f0;
+    --muted:    #8892a4;
+    --accent:   #6366f1;
+    --green:    #22c55e;
+    --yellow:   #eab308;
+    --red:      #ef4444;
+    --blue:     #3b82f6;
+    --purple:   #a855f7;
+    --dim:      #4b5563;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: var(--bg); color: var(--text); font-family: 'Inter', system-ui, sans-serif; font-size: 14px; }
+
+  /* Layout */
+  .app { display: flex; min-height: 100vh; }
+  .sidebar { width: 220px; background: var(--surface); border-right: 1px solid var(--border); padding: 20px 0; flex-shrink: 0; display: flex; flex-direction: column; }
+  .sidebar-logo { padding: 0 20px 24px; border-bottom: 1px solid var(--border); margin-bottom: 16px; }
+  .sidebar-logo h1 { font-size: 15px; font-weight: 700; color: var(--text); line-height: 1.3; }
+  .sidebar-logo span { font-size: 11px; color: var(--muted); }
+  nav a { display: flex; align-items: center; gap: 10px; padding: 10px 20px; color: var(--muted); text-decoration: none; font-size: 13px; font-weight: 500; transition: all 0.15s; cursor: pointer; border: none; background: none; width: 100%; text-align: left; }
+  nav a:hover, nav a.active { color: var(--text); background: rgba(99,102,241,0.12); }
+  nav a.active { border-right: 2px solid var(--accent); }
+  nav a svg { width: 16px; height: 16px; flex-shrink: 0; }
+
+  .main { flex: 1; overflow-y: auto; }
+  .page { display: none; padding: 28px 32px; max-width: 1300px; }
+  .page.active { display: block; }
+
+  /* Cards */
+  .card { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 20px; }
+  .card-title { font-size: 12px; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 8px; }
+
+  /* Stats grid */
+  .stats-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); gap: 14px; margin-bottom: 24px; }
+  .stat-card { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 16px; }
+  .stat-value { font-size: 28px; font-weight: 700; line-height: 1; }
+  .stat-label { font-size: 12px; color: var(--muted); margin-top: 4px; }
+
+  /* Charts row */
+  .charts-row { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-bottom: 24px; }
+  .chart-box { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 20px; }
+  .chart-box h3 { font-size: 13px; font-weight: 600; margin-bottom: 16px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.05em; }
+  canvas { max-height: 220px; }
+
+  /* Table */
+  .table-wrap { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; overflow: hidden; }
+  .table-header { padding: 16px 20px; border-bottom: 1px solid var(--border); display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+  .table-title { font-size: 14px; font-weight: 600; }
+  table { width: 100%; border-collapse: collapse; }
+  th { text-align: left; padding: 10px 16px; font-size: 11px; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: 0.05em; background: rgba(0,0,0,0.2); border-bottom: 1px solid var(--border); }
+  td { padding: 11px 16px; border-bottom: 1px solid rgba(42,45,58,0.5); vertical-align: top; }
+  tr:last-child td { border-bottom: none; }
+  tr:hover td { background: rgba(99,102,241,0.04); }
+  tr.clickable { cursor: pointer; }
+
+  /* Badges */
+  .badge { display: inline-flex; align-items: center; padding: 2px 8px; border-radius: 4px; font-size: 11px; font-weight: 600; white-space: nowrap; }
+  .badge-materialized    { background: rgba(34,197,94,0.15);  color: var(--green); }
+  .badge-partial         { background: rgba(234,179,8,0.15);  color: var(--yellow); }
+  .badge-not_materialized{ background: rgba(239,68,68,0.15);  color: var(--red); }
+  .badge-open            { background: rgba(59,130,246,0.15); color: var(--blue); }
+  .badge-superseded      { background: rgba(168,85,247,0.15); color: var(--purple); }
+  .badge-unresolvable    { background: rgba(75,85,99,0.3);    color: var(--dim); }
+  .badge-hard            { background: rgba(34,197,94,0.12);  color: var(--green); }
+  .badge-soft            { background: rgba(234,179,8,0.12);  color: var(--yellow); }
+  .badge-speculative     { background: rgba(75,85,99,0.2);    color: var(--muted); }
+
+  .type-badge { display: inline-block; padding: 2px 7px; border-radius: 4px; font-size: 10px; font-weight: 600; background: rgba(99,102,241,0.15); color: #818cf8; }
+
+  /* Filters */
+  .filters { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+  .filters select, .filters input { background: var(--bg); border: 1px solid var(--border); color: var(--text); border-radius: 6px; padding: 6px 10px; font-size: 13px; outline: none; }
+  .filters select:focus, .filters input:focus { border-color: var(--accent); }
+  .btn { background: var(--accent); color: white; border: none; border-radius: 6px; padding: 7px 14px; font-size: 13px; font-weight: 600; cursor: pointer; transition: opacity 0.15s; }
+  .btn:hover { opacity: 0.85; }
+  .btn:disabled { opacity: 0.4; cursor: not-allowed; }
+  .btn-ghost { background: transparent; border: 1px solid var(--border); color: var(--text); }
+  .btn-danger { background: var(--red); }
+
+  /* Pagination */
+  .pagination { display: flex; align-items: center; gap: 8px; padding: 14px 20px; border-top: 1px solid var(--border); }
+  .pagination span { font-size: 13px; color: var(--muted); }
+
+  /* Claim detail modal */
+  .modal-overlay { display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.7); z-index: 100; align-items: flex-start; justify-content: center; padding: 40px 20px; overflow-y: auto; }
+  .modal-overlay.open { display: flex; }
+  .modal { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; width: 100%; max-width: 860px; }
+  .modal-header { padding: 20px 24px; border-bottom: 1px solid var(--border); display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; }
+  .modal-body { padding: 24px; }
+  .modal-close { background: none; border: none; color: var(--muted); cursor: pointer; font-size: 20px; padding: 0; line-height: 1; }
+  .modal-close:hover { color: var(--text); }
+
+  .detail-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 20px; }
+  .detail-item { background: var(--bg); border-radius: 8px; padding: 12px; }
+  .detail-label { font-size: 11px; color: var(--muted); font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 4px; }
+  .detail-value { font-size: 13px; }
+
+  .quote-box { background: var(--bg); border-left: 3px solid var(--accent); padding: 12px 16px; border-radius: 0 8px 8px 0; font-style: italic; color: var(--muted); line-height: 1.6; margin-bottom: 20px; }
+
+  .section-title { font-size: 12px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); margin: 20px 0 10px; padding-bottom: 6px; border-bottom: 1px solid var(--border); }
+
+  /* Audit timeline */
+  .timeline { position: relative; padding-left: 24px; }
+  .timeline::before { content: ''; position: absolute; left: 7px; top: 6px; bottom: 6px; width: 2px; background: var(--border); }
+  .timeline-item { position: relative; margin-bottom: 16px; }
+  .timeline-dot { position: absolute; left: -21px; top: 4px; width: 12px; height: 12px; border-radius: 50%; border: 2px solid var(--bg); }
+  .timeline-date { font-size: 11px; color: var(--muted); margin-bottom: 4px; }
+  .timeline-content { background: var(--bg); border-radius: 8px; padding: 10px 12px; }
+  .timeline-transition { font-size: 12px; font-weight: 600; margin-bottom: 4px; }
+  .timeline-reason { font-size: 12px; color: var(--muted); line-height: 1.5; }
+
+  /* Evidence list */
+  .evidence-item { background: var(--bg); border-radius: 8px; padding: 12px; margin-bottom: 8px; }
+  .evidence-meta { font-size: 11px; color: var(--muted); margin-bottom: 6px; }
+  .evidence-quote { font-size: 12px; font-style: italic; color: var(--text); line-height: 1.5; border-left: 2px solid var(--green); padding-left: 10px; }
+  .evidence-quote.contradicts { border-left-color: var(--red); }
+
+  /* Pipeline page */
+  .pipeline-status { display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px; margin-bottom: 24px; }
+  .progress-bar-wrap { background: var(--border); border-radius: 4px; height: 8px; overflow: hidden; margin: 8px 0 4px; }
+  .progress-bar-fill { height: 100%; background: var(--accent); border-radius: 4px; transition: width 0.3s; }
+
+  .log-box { background: var(--bg); border: 1px solid var(--border); border-radius: 8px; padding: 16px; font-family: 'Fira Code', 'Cascadia Code', monospace; font-size: 12px; line-height: 1.7; height: 460px; overflow-y: auto; }
+  .log-line { padding: 1px 0; }
+  .log-start     { color: var(--blue); }
+  .log-trace     { color: var(--muted); }
+  .log-extracted { color: var(--accent); }
+  .log-resolved  { color: var(--green); }
+  .log-done      { color: var(--green); font-weight: 700; }
+  .log-error     { color: var(--red); }
+  .log-rule      { color: var(--yellow); font-weight: 600; border-top: 1px solid var(--border); margin-top: 4px; padding-top: 4px; }
+
+  /* Transcripts timeline */
+  .transcript-list { display: flex; flex-direction: column; gap: 8px; }
+  .transcript-item { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 14px 18px; display: flex; align-items: center; gap: 16px; cursor: pointer; transition: border-color 0.15s; }
+  .transcript-item:hover { border-color: var(--accent); }
+  .t-order { width: 32px; height: 32px; background: var(--bg); border-radius: 6px; display: flex; align-items: center; justify-content: center; font-size: 12px; font-weight: 700; color: var(--muted); flex-shrink: 0; }
+  .t-date { font-size: 12px; color: var(--muted); min-width: 90px; }
+  .t-event { font-size: 13px; font-weight: 600; flex: 1; }
+  .t-count { font-size: 12px; color: var(--muted); white-space: nowrap; }
+
+  /* Loader */
+  .loader { display: inline-block; width: 16px; height: 16px; border: 2px solid var(--border); border-top-color: var(--accent); border-radius: 50%; animation: spin 0.7s linear infinite; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  .empty-state { text-align: center; padding: 60px 20px; color: var(--muted); }
+  .empty-state svg { width: 40px; height: 40px; margin-bottom: 12px; opacity: 0.3; }
+
+  h2 { font-size: 20px; font-weight: 700; margin-bottom: 20px; }
+
+  @media (max-width: 900px) {
+    .charts-row { grid-template-columns: 1fr; }
+    .detail-grid { grid-template-columns: 1fr; }
+    .pipeline-status { grid-template-columns: repeat(2, 1fr); }
+  }
+</style>
+</head>
+<body>
+<div class="app">
+  <!-- Sidebar -->
+  <aside class="sidebar">
+    <div class="sidebar-logo">
+      <h1>Rockwool Claims Tracker</h1>
+      <span>Walk-forward AI System</span>
+    </div>
+    <nav>
+      <a onclick="showPage('dashboard')" id="nav-dashboard" class="active">
+        <svg fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/></svg>
+        Dashboard
+      </a>
+      <a onclick="showPage('claims')" id="nav-claims">
+        <svg fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2"/></svg>
+        Claims Explorer
+      </a>
+      <a onclick="showPage('transcripts')" id="nav-transcripts">
+        <svg fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
+        Transcripts
+      </a>
+      <a onclick="showPage('pipeline')" id="nav-pipeline">
+        <svg fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><polygon points="5 3 19 12 5 21 5 3"/></svg>
+        Pipeline
+      </a>
+    </nav>
+  </aside>
+
+  <!-- Main content -->
+  <main class="main">
+
+    <!-- ── DASHBOARD ── -->
+    <div class="page active" id="page-dashboard">
+      <h2>Dashboard</h2>
+
+      <div class="stats-grid" id="stats-grid">
+        <div class="stat-card"><div class="stat-value" id="s-total">—</div><div class="stat-label">Total Claims</div></div>
+        <div class="stat-card"><div class="stat-value" style="color:var(--blue)" id="s-open">—</div><div class="stat-label">Open</div></div>
+        <div class="stat-card"><div class="stat-value" style="color:var(--green)" id="s-mat">—</div><div class="stat-label">Materialized</div></div>
+        <div class="stat-card"><div class="stat-value" style="color:var(--yellow)" id="s-partial">—</div><div class="stat-label">Partial</div></div>
+        <div class="stat-card"><div class="stat-value" style="color:var(--red)" id="s-not">—</div><div class="stat-label">Not Materialized</div></div>
+        <div class="stat-card"><div class="stat-value" style="color:var(--accent)" id="s-hitrate">—</div><div class="stat-label">Hit Rate</div></div>
+        <div class="stat-card"><div class="stat-value" id="s-transcripts">—</div><div class="stat-label">Transcripts</div></div>
+        <div class="stat-card"><div class="stat-value" id="s-evidence">—</div><div class="stat-label">Evidence Items</div></div>
+      </div>
+
+      <div class="charts-row">
+        <div class="chart-box">
+          <h3>Resolution Status</h3>
+          <canvas id="chart-donut"></canvas>
+        </div>
+        <div class="chart-box">
+          <h3>Claims by Type</h3>
+          <canvas id="chart-types"></canvas>
+        </div>
+      </div>
+
+      <div class="chart-box" style="margin-bottom:24px">
+        <h3>Claims Made vs Resolved Over Time</h3>
+        <canvas id="chart-timeline" style="max-height:180px"></canvas>
+      </div>
+
+      <div class="table-wrap">
+        <div class="table-header"><span class="table-title">Speaker Scorecard</span></div>
+        <table>
+          <thead><tr>
+            <th>Speaker</th><th>Total Resolved</th><th>Materialized</th><th>Partial</th><th>Missed</th><th>Hit Rate</th>
+          </tr></thead>
+          <tbody id="scorecard-body"></tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- ── CLAIMS EXPLORER ── -->
+    <div class="page" id="page-claims">
+      <h2>Claims Explorer</h2>
+      <div class="table-wrap">
+        <div class="table-header">
+          <div class="filters">
+            <input id="f-search" placeholder="Search claims…" oninput="debounceClaims()" style="width:200px">
+            <select id="f-status" onchange="loadClaims()">
+              <option value="">All Statuses</option>
+              <option value="open">Open</option>
+              <option value="materialized">Materialized</option>
+              <option value="partially_materialized">Partially Materialized</option>
+              <option value="not_materialized">Not Materialized</option>
+              <option value="superseded">Superseded</option>
+              <option value="unresolvable">Unresolvable</option>
+            </select>
+            <select id="f-type" onchange="loadClaims()">
+              <option value="">All Types</option>
+              <option value="financial_guidance">Financial Guidance</option>
+              <option value="operational_milestone">Operational Milestone</option>
+              <option value="market_outlook">Market Outlook</option>
+              <option value="strategic_initiative">Strategic Initiative</option>
+              <option value="esg_commitment">ESG Commitment</option>
+              <option value="macro_assumption">Macro Assumption</option>
+              <option value="hedged_statement">Hedged Statement</option>
+            </select>
+            <select id="f-hedge" onchange="loadClaims()">
+              <option value="">All Hedge Levels</option>
+              <option value="hard">Hard</option>
+              <option value="soft">Soft</option>
+              <option value="speculative">Speculative</option>
+            </select>
+            <button class="btn btn-ghost" onclick="clearFilters()">Clear</button>
+          </div>
+          <span id="claims-count" style="font-size:12px;color:var(--muted)"></span>
+        </div>
+        <table>
+          <thead><tr>
+            <th>Date</th><th>Speaker</th><th>Summary</th><th>Type</th><th>Hedge</th><th>Status</th><th>Timeframe</th>
+          </tr></thead>
+          <tbody id="claims-body">
+            <tr><td colspan="7" style="text-align:center;padding:40px;color:var(--muted)"><span class="loader"></span></td></tr>
+          </tbody>
+        </table>
+        <div class="pagination">
+          <button class="btn btn-ghost" id="btn-prev" onclick="changePage(-1)" disabled>← Prev</button>
+          <span id="page-info">Page 1</span>
+          <button class="btn btn-ghost" id="btn-next" onclick="changePage(1)">Next →</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- ── TRANSCRIPTS ── -->
+    <div class="page" id="page-transcripts">
+      <h2>Transcripts Timeline</h2>
+      <div class="transcript-list" id="transcript-list">
+        <div style="text-align:center;padding:40px;color:var(--muted)"><span class="loader"></span></div>
+      </div>
+    </div>
+
+    <!-- ── PIPELINE ── -->
+    <div class="page" id="page-pipeline">
+      <h2>Pipeline</h2>
+      <div class="pipeline-status">
+        <div class="stat-card">
+          <div class="stat-value" id="p-total">—</div>
+          <div class="stat-label">Total Transcripts</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-value" style="color:var(--green)" id="p-processed">—</div>
+          <div class="stat-label">Processed</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-value" style="color:var(--yellow)" id="p-pending">—</div>
+          <div class="stat-label">Pending</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-value" id="p-status-val">—</div>
+          <div class="stat-label">Status</div>
+        </div>
+      </div>
+
+      <div class="progress-bar-wrap" id="p-progress-wrap" style="margin-bottom:16px;display:none">
+        <div class="progress-bar-fill" id="p-progress-fill" style="width:0%"></div>
+      </div>
+
+      <div style="display:flex;gap:10px;margin-bottom:16px;align-items:center">
+        <button class="btn" id="btn-run" onclick="startPipeline(false)">▶ Run Pipeline (Resume)</button>
+        <button class="btn btn-ghost" id="btn-run-fresh" onclick="startPipeline(true)">↺ Reprocess All</button>
+        <span id="pipeline-running-msg" style="color:var(--accent);font-size:13px;display:none">
+          <span class="loader"></span> Processing…
+        </span>
+      </div>
+
+      <div class="card" style="margin-bottom:16px">
+        <div class="card-title">Live Log</div>
+        <div class="log-box" id="log-box">
+          <div class="log-line log-trace">Waiting to start…</div>
+        </div>
+      </div>
+
+      <div class="table-wrap">
+        <div class="table-header"><span class="table-title">Processing Runs History</span></div>
+        <table>
+          <thead><tr><th>#</th><th>Transcript</th><th>Status</th><th>Extracted</th><th>Resolved</th><th>Started</th><th>Duration</th></tr></thead>
+          <tbody id="runs-body">
+            <tr><td colspan="7" style="text-align:center;padding:30px;color:var(--muted)">Load pipeline first</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+  </main>
+</div>
+
+<!-- Claim Detail Modal -->
+<div class="modal-overlay" id="claim-modal" onclick="closeModalOutside(event)">
+  <div class="modal">
+    <div class="modal-header">
+      <div>
+        <div style="font-size:12px;color:var(--muted);margin-bottom:4px" id="modal-meta"></div>
+        <div style="font-size:16px;font-weight:700" id="modal-title"></div>
+      </div>
+      <button class="modal-close" onclick="closeModal()">✕</button>
+    </div>
+    <div class="modal-body" id="modal-body">
+      <div style="text-align:center;padding:40px"><span class="loader"></span></div>
+    </div>
+  </div>
+</div>
+
+<script>
+const API = '/api';
+let claimsPage = 1;
+let claimsTotal = 0;
+let donutChart, typesChart, timelineChart;
+let searchTimer;
+
+// ── Navigation ────────────────────────────────────────────────────────────────
+function showPage(name) {
+  document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
+  document.querySelectorAll('nav a').forEach(a => a.classList.remove('active'));
+  document.getElementById('page-' + name).classList.add('active');
+  document.getElementById('nav-' + name).classList.add('active');
+  if (name === 'dashboard')    loadDashboard();
+  if (name === 'claims')       loadClaims();
+  if (name === 'transcripts')  loadTranscripts();
+  if (name === 'pipeline')     loadPipelineStatus();
+}
+
+// ── DASHBOARD ─────────────────────────────────────────────────────────────────
+async function loadDashboard() {
+  try {
+    const d = await fetch(`${API}/dashboard`).then(r => r.json());
+    const s = d.resolution_stats;
+
+    document.getElementById('s-total').textContent       = s.total;
+    document.getElementById('s-open').textContent        = s.open;
+    document.getElementById('s-mat').textContent         = s.materialized;
+    document.getElementById('s-partial').textContent     = s.partially_materialized;
+    document.getElementById('s-not').textContent         = s.not_materialized;
+    document.getElementById('s-hitrate').textContent     = (s.directional_accuracy * 100).toFixed(1) + '%';
+    document.getElementById('s-transcripts').textContent = d.total_transcripts;
+    document.getElementById('s-evidence').textContent    = d.total_evidence;
+
+    drawDonut(s);
+    drawTypes(d.by_type);
+    drawTimeline(d.timeline);
+    drawScorecard(d.by_speaker);
+  } catch(e) {
+    console.error(e);
+  }
+}
+
+function drawDonut(s) {
+  const ctx = document.getElementById('chart-donut').getContext('2d');
+  if (donutChart) donutChart.destroy();
+  donutChart = new Chart(ctx, {
+    type: 'doughnut',
+    data: {
+      labels: ['Open','Materialized','Partial','Not Materialized','Superseded','Unresolvable'],
+      datasets: [{
+        data: [s.open, s.materialized, s.partially_materialized, s.not_materialized, s.superseded, s.unresolvable],
+        backgroundColor: ['#3b82f6','#22c55e','#eab308','#ef4444','#a855f7','#4b5563'],
+        borderWidth: 0,
+      }]
+    },
+    options: {
+      plugins: { legend: { position: 'right', labels: { color: '#8892a4', boxWidth: 12, padding: 10 }}},
+      cutout: '65%',
+    }
+  });
+}
+
+function drawTypes(types) {
+  const ctx = document.getElementById('chart-types').getContext('2d');
+  if (typesChart) typesChart.destroy();
+  const sorted = [...types].sort((a,b) => b.total - a.total).slice(0,7);
+  typesChart = new Chart(ctx, {
+    type: 'bar',
+    data: {
+      labels: sorted.map(t => t.claim_type.replace(/_/g,' ')),
+      datasets: [{
+        label: 'Total',
+        data: sorted.map(t => t.total),
+        backgroundColor: '#6366f1cc',
+      },{
+        label: 'Materialized',
+        data: sorted.map(t => t.materialized),
+        backgroundColor: '#22c55ecc',
+      }]
+    },
+    options: {
+      indexAxis: 'y',
+      plugins: { legend: { labels: { color: '#8892a4', boxWidth: 12 }}},
+      scales: {
+        x: { ticks: { color: '#8892a4' }, grid: { color: '#2a2d3a' }},
+        y: { ticks: { color: '#8892a4' }, grid: { display: false }},
+      }
+    }
+  });
+}
+
+function drawTimeline(tl) {
+  const ctx = document.getElementById('chart-timeline').getContext('2d');
+  if (timelineChart) timelineChart.destroy();
+  timelineChart = new Chart(ctx, {
+    type: 'bar',
+    data: {
+      labels: tl.map(t => t.date),
+      datasets: [
+        { label: 'Claims Made',     data: tl.map(t => t.claims_made),     backgroundColor: '#6366f1aa', },
+        { label: 'Claims Resolved', data: tl.map(t => t.claims_resolved), backgroundColor: '#22c55eaa', },
+      ]
+    },
+    options: {
+      plugins: { legend: { labels: { color: '#8892a4', boxWidth: 12 }}},
+      scales: {
+        x: { ticks: { color: '#8892a4', maxRotation: 45, font: { size: 10 }}, grid: { color: '#2a2d3a' }},
+        y: { ticks: { color: '#8892a4' }, grid: { color: '#2a2d3a' }},
+      }
+    }
+  });
+}
+
+function drawScorecard(speakers) {
+  const tbody = document.getElementById('scorecard-body');
+  tbody.innerHTML = speakers.map(s => `
+    <tr>
+      <td style="font-weight:500">${s.speaker_name}</td>
+      <td>${s.total}</td>
+      <td style="color:var(--green)">${s.materialized}</td>
+      <td style="color:var(--yellow)">${s.partially_materialized}</td>
+      <td style="color:var(--red)">${s.not_materialized}</td>
+      <td>
+        <div style="display:flex;align-items:center;gap:8px">
+          <div style="width:60px;background:var(--border);border-radius:3px;height:6px">
+            <div style="width:${s.hit_rate*100}%;background:var(--green);height:100%;border-radius:3px"></div>
+          </div>
+          <span style="color:var(--green)">${(s.hit_rate*100).toFixed(0)}%</span>
+        </div>
+      </td>
+    </tr>
+  `).join('') || '<tr><td colspan="6" style="text-align:center;color:var(--muted);padding:30px">No resolved claims yet</td></tr>';
+}
+
+// ── CLAIMS ────────────────────────────────────────────────────────────────────
+function debounceClaims() {
+  clearTimeout(searchTimer);
+  searchTimer = setTimeout(() => { claimsPage = 1; loadClaims(); }, 350);
+}
+
+function clearFilters() {
+  ['f-search','f-status','f-type','f-hedge'].forEach(id => {
+    const el = document.getElementById(id);
+    if (el) el.value = '';
+  });
+  claimsPage = 1;
+  loadClaims();
+}
+
+function changePage(delta) {
+  claimsPage = Math.max(1, claimsPage + delta);
+  loadClaims();
+}
+
+async function loadClaims() {
+  const params = new URLSearchParams({
+    page: claimsPage,
+    page_size: 50,
+  });
+  const search = document.getElementById('f-search')?.value?.trim();
+  const status = document.getElementById('f-status')?.value;
+  const type   = document.getElementById('f-type')?.value;
+  const hedge  = document.getElementById('f-hedge')?.value;
+  if (search) params.set('search', search);
+  if (status) params.set('status', status);
+  if (type)   params.set('claim_type', type);
+  if (hedge)  params.set('hedge_level', hedge);
+
+  const tbody = document.getElementById('claims-body');
+  tbody.innerHTML = '<tr><td colspan="7" style="text-align:center;padding:30px"><span class="loader"></span></td></tr>';
+
+  try {
+    const data = await fetch(`${API}/claims?${params}`).then(r => r.json());
+    claimsTotal = data.total;
+    document.getElementById('claims-count').textContent = `${data.total} claims`;
+    document.getElementById('page-info').textContent = `Page ${data.page} of ${Math.max(1, Math.ceil(data.total / data.page_size))}`;
+    document.getElementById('btn-prev').disabled = claimsPage <= 1;
+    document.getElementById('btn-next').disabled = claimsPage >= Math.ceil(data.total / data.page_size);
+
+    tbody.innerHTML = data.items.map(c => `
+      <tr class="clickable" onclick="openClaim(${c.id})">
+        <td style="white-space:nowrap;color:var(--muted);font-size:12px">${c.transcript_date || ''}</td>
+        <td style="white-space:nowrap;font-size:12px">${c.speaker_name}</td>
+        <td style="max-width:340px;line-height:1.4">${c.claim_summary}</td>
+        <td><span class="type-badge">${(c.claim_type||'').replace(/_/g,' ')}</span></td>
+        <td><span class="badge badge-${c.hedge_level}">${c.hedge_level}</span></td>
+        <td><span class="badge badge-${c.resolution_status === 'partially_materialized' ? 'partial' : c.resolution_status}">${c.resolution_status.replace(/_/g,' ')}</span></td>
+        <td style="font-size:12px;color:var(--muted)">${c.timeframe || ''}</td>
+      </tr>
+    `).join('') || '<tr><td colspan="7" style="text-align:center;padding:40px;color:var(--muted)">No claims match your filters</td></tr>';
+  } catch(e) {
+    tbody.innerHTML = `<tr><td colspan="7" style="text-align:center;color:var(--red);padding:30px">Error loading claims: ${e.message}</td></tr>`;
+  }
+}
+
+// ── CLAIM DETAIL MODAL ────────────────────────────────────────────────────────
+async function openClaim(id) {
+  document.getElementById('modal-meta').textContent = `Claim #${id}`;
+  document.getElementById('modal-title').textContent = 'Loading…';
+  document.getElementById('modal-body').innerHTML = '<div style="text-align:center;padding:40px"><span class="loader"></span></div>';
+  document.getElementById('claim-modal').classList.add('open');
+
+  try {
+    const c = await fetch(`${API}/claims/${id}`).then(r => r.json());
+    const statusColor = {
+      materialized:'var(--green)', partially_materialized:'var(--yellow)',
+      not_materialized:'var(--red)', open:'var(--blue)',
+      superseded:'var(--purple)', unresolvable:'var(--dim)'
+    }[c.resolution_status] || 'var(--text)';
+
+    document.getElementById('modal-meta').textContent =
+      `${c.event_type || ''} · ${c.transcript_date || ''} · Claim #${c.id}`;
+    document.getElementById('modal-title').textContent = c.claim_summary;
+
+    // Evidence HTML
+    const evHTML = c.evidence?.length ? c.evidence.map(e => `
+      <div class="evidence-item">
+        <div class="evidence-meta">
+          <strong>${e.speaker_name || 'Unknown'}</strong> · ${e.event_type || ''} ${e.transcript_date || ''}
+          · <span style="color:${e.supports_claim ? 'var(--green)' : 'var(--red)'}">
+            ${e.supports_claim ? '✓ Supports' : '✗ Contradicts'}
+          </span>
+        </div>
+        <div class="evidence-quote ${e.supports_claim ? '' : 'contradicts'}">"${e.raw_quote}"</div>
+        ${e.evidence_summary ? `<div style="font-size:12px;color:var(--muted);margin-top:6px">${e.evidence_summary}</div>` : ''}
+      </div>
+    `).join('') : '<div style="color:var(--muted);font-size:13px">No evidence recorded yet</div>';
+
+    // Audit trail HTML
+    const dotColor = s => ({
+      materialized:'#22c55e', partially_materialized:'#eab308',
+      not_materialized:'#ef4444', open:'#3b82f6',
+      superseded:'#a855f7', unresolvable:'#4b5563'
+    }[s] || '#6366f1');
+
+    const auditHTML = c.audit_trail?.length ? `
+      <div class="timeline">
+        ${c.audit_trail.map(a => `
+          <div class="timeline-item">
+            <div class="timeline-dot" style="background:${dotColor(a.new_status)}"></div>
+            <div class="timeline-date">${a.changed_at?.slice(0,10)} · via ${a.source_transcript_date || 'system'} · ${a.agent_name || ''}</div>
+            <div class="timeline-content">
+              <div class="timeline-transition">
+                <span style="color:var(--muted)">${a.old_status.replace(/_/g,' ')}</span>
+                → <span style="color:${dotColor(a.new_status)};font-weight:700">${a.new_status.replace(/_/g,' ')}</span>
+              </div>
+              <div class="timeline-reason">${a.reasoning}</div>
+            </div>
+          </div>
+        `).join('')}
+      </div>
+    ` : '<div style="color:var(--muted);font-size:13px">No status changes recorded yet</div>';
+
+    document.getElementById('modal-body').innerHTML = `
+      <div class="detail-grid">
+        <div class="detail-item"><div class="detail-label">Speaker</div><div class="detail-value">${c.speaker_name} <span style="color:var(--muted)">${c.speaker_title||''}</span></div></div>
+        <div class="detail-item"><div class="detail-label">Type</div><div class="detail-value"><span class="type-badge">${(c.claim_type||'').replace(/_/g,' ')}</span></div></div>
+        <div class="detail-item"><div class="detail-label">Hedge Level</div><div class="detail-value"><span class="badge badge-${c.hedge_level}">${c.hedge_level}</span></div></div>
+        <div class="detail-item"><div class="detail-label">Status</div><div class="detail-value" style="color:${statusColor};font-weight:700">${c.resolution_status.replace(/_/g,' ')}</div></div>
+        <div class="detail-item"><div class="detail-label">Timeframe</div><div class="detail-value">${c.timeframe||'—'} ${c.timeframe_date ? `<span style="color:var(--muted)">(${c.timeframe_date})</span>` : ''}</div></div>
+        <div class="detail-item"><div class="detail-label">Tags</div><div class="detail-value">${(c.tags||[]).map(t=>`<span class="type-badge">${t}</span>`).join(' ')||'—'}</div></div>
+      </div>
+
+      <div class="quote-box">"${c.raw_quote}"</div>
+
+      ${c.resolution_reasoning ? `
+        <div class="section-title">Resolution Reasoning</div>
+        <div style="font-size:13px;line-height:1.6;color:var(--muted);margin-bottom:16px">${c.resolution_reasoning}</div>
+      ` : ''}
+
+      <div class="section-title">Evidence (${c.evidence?.length || 0})</div>
+      ${evHTML}
+
+      <div class="section-title">Audit Trail</div>
+      ${auditHTML}
+    `;
+  } catch(e) {
+    document.getElementById('modal-body').innerHTML = `<div style="color:var(--red)">Error: ${e.message}</div>`;
+  }
+}
+
+function closeModal() { document.getElementById('claim-modal').classList.remove('open'); }
+function closeModalOutside(e) { if (e.target === document.getElementById('claim-modal')) closeModal(); }
+
+// ── TRANSCRIPTS ───────────────────────────────────────────────────────────────
+async function loadTranscripts() {
+  const list = document.getElementById('transcript-list');
+  list.innerHTML = '<div style="text-align:center;padding:40px;color:var(--muted)"><span class="loader"></span></div>';
+  try {
+    const data = await fetch(`${API}/transcripts`).then(r => r.json());
+    if (!data.length) {
+      list.innerHTML = '<div class="empty-state">No transcripts processed yet. Run the pipeline first.</div>';
+      return;
+    }
+    list.innerHTML = data.map(t => `
+      <div class="transcript-item" onclick="openTranscriptClaims(${t.id}, '${t.event_type}', '${t.transcript_date}')">
+        <div class="t-order">${t.processing_order}</div>
+        <div class="t-date">${t.transcript_date}</div>
+        <div>
+          <div class="t-event">${t.event_type}</div>
+          <div style="font-size:11px;color:var(--muted)">${t.fiscal_period || ''}</div>
+        </div>
+        <div style="flex:1"></div>
+        <div class="t-count"><span style="color:var(--accent);font-weight:600">${t.claim_count}</span> claims</div>
+      </div>
+    `).join('');
+  } catch(e) {
+    list.innerHTML = `<div style="color:var(--red);padding:20px">Error: ${e.message}</div>`;
+  }
+}
+
+function openTranscriptClaims(id, eventType, date) {
+  showPage('claims');
+  // Filter claims to this transcript's date
+  document.getElementById('f-search').value = '';
+  loadClaims();
+}
+
+// ── PIPELINE ──────────────────────────────────────────────────────────────────
+async function loadPipelineStatus() {
+  try {
+    const s = await fetch(`${API}/pipeline/status`).then(r => r.json());
+    document.getElementById('p-total').textContent     = s.total_transcripts;
+    document.getElementById('p-processed').textContent = s.processed;
+    document.getElementById('p-pending').textContent   = s.pending;
+    document.getElementById('p-status-val').textContent = s.is_running ? '🔄 Running' : (s.processed > 0 ? '✓ Idle' : '⏸ Not started');
+    document.getElementById('btn-run').disabled        = s.is_running;
+    document.getElementById('btn-run-fresh').disabled  = s.is_running;
+
+    const pct = s.total_transcripts > 0 ? (s.processed / s.total_transcripts) * 100 : 0;
+    document.getElementById('p-progress-wrap').style.display = 'block';
+    document.getElementById('p-progress-fill').style.width = pct + '%';
+  } catch(e) {}
+
+  loadRuns();
+}
+
+async function loadRuns() {
+  try {
+    const runs = await fetch(`${API}/pipeline/runs`).then(r => r.json());
+    const tbody = document.getElementById('runs-body');
+    if (!runs.length) {
+      tbody.innerHTML = '<tr><td colspan="7" style="text-align:center;color:var(--muted);padding:20px">No runs yet</td></tr>';
+      return;
+    }
+    tbody.innerHTML = runs.slice(0,30).map(r => {
+      const dur = r.run_ended_at && r.run_started_at
+        ? Math.round((new Date(r.run_ended_at) - new Date(r.run_started_at)) / 1000) + 's'
+        : '—';
+      const sc = {completed:'var(--green)', failed:'var(--red)', running:'var(--accent)', pending:'var(--muted)'}[r.status];
+      return `<tr>
+        <td style="color:var(--muted)">#${r.id}</td>
+        <td style="font-size:12px;max-width:260px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${r.transcript_filename||''}</td>
+        <td><span style="color:${sc};font-weight:600">${r.status}</span></td>
+        <td>${r.claims_extracted}</td>
+        <td>${r.claims_resolved}</td>
+        <td style="font-size:12px;color:var(--muted)">${r.run_started_at?.slice(0,16)||''}</td>
+        <td style="font-size:12px;color:var(--muted)">${dur}</td>
+      </tr>`;
+    }).join('');
+  } catch(e) {}
+}
+
+function startPipeline(fresh) {
+  if (!confirm(fresh ? 'Reprocess ALL transcripts from scratch?' : 'Start pipeline (will resume from where it left off)?')) return;
+
+  const logBox = document.getElementById('log-box');
+  logBox.innerHTML = '';
+  document.getElementById('btn-run').disabled = true;
+  document.getElementById('btn-run-fresh').disabled = true;
+  document.getElementById('pipeline-running-msg').style.display = 'flex';
+
+  let extracted = 0, resolved = 0;
+
+  const appendLog = (text, cls) => {
+    const div = document.createElement('div');
+    div.className = 'log-line ' + cls;
+    div.textContent = text;
+    logBox.appendChild(div);
+    logBox.scrollTop = logBox.scrollHeight;
+  };
+
+  const url = `${API}/pipeline/run?resume=${!fresh}`;
+  const es  = new EventSource(url);
+
+  es.onmessage = (e) => {
+    const evt = JSON.parse(e.data);
+    const kind = evt.event;
+
+    if (kind === 'pipeline_start')    appendLog('▶ ' + (evt.message||'Pipeline started'), 'log-start');
+    else if (kind === 'pipeline_info') appendLog('  ' + (evt.message || `Total: ${evt.total_transcripts}`), 'log-trace');
+    else if (kind === 'transcript_start') {
+      appendLog(`\n── [${evt.index}/${evt.total}] ${evt.filename}`, 'log-rule');
+      document.getElementById('p-processed').textContent = evt.index - 1;
+      const pct = evt.total > 0 ? ((evt.index-1)/evt.total)*100 : 0;
+      document.getElementById('p-progress-fill').style.width = pct + '%';
+    }
+    else if (kind === 'agent_trace')   appendLog('  ' + evt.message, 'log-trace');
+    else if (kind === 'claim_extracted') {
+      extracted++;
+      appendLog(`  + [${evt.claim_type}] ${evt.speaker}: ${evt.summary}`, 'log-extracted');
+    }
+    else if (kind === 'claim_resolved') {
+      resolved++;
+      appendLog(`  ✓ #${evt.claim_id} → ${evt.new_status}: ${evt.reasoning?.slice(0,100)}`, 'log-resolved');
+    }
+    else if (kind === 'transcript_done')
+      appendLog(`  Done: ${evt.claims_extracted} extracted, ${evt.claims_resolved} resolved`, 'log-done');
+    else if (kind === 'transcript_error') appendLog('  ERROR: ' + evt.error, 'log-error');
+    else if (kind === 'pipeline_done') {
+      appendLog(`\n✓ Pipeline complete — ${extracted} extracted, ${resolved} resolved`, 'log-done');
+      es.close();
+      document.getElementById('btn-run').disabled = false;
+      document.getElementById('btn-run-fresh').disabled = false;
+      document.getElementById('pipeline-running-msg').style.display = 'none';
+      document.getElementById('p-progress-fill').style.width = '100%';
+      loadPipelineStatus();
+    }
+    else if (kind === 'error') {
+      appendLog('FATAL: ' + evt.message, 'log-error');
+      es.close();
+      document.getElementById('btn-run').disabled = false;
+      document.getElementById('btn-run-fresh').disabled = false;
+      document.getElementById('pipeline-running-msg').style.display = 'none';
+    }
+  };
+
+  es.onerror = () => {
+    appendLog('Connection closed', 'log-trace');
+    es.close();
+    document.getElementById('btn-run').disabled = false;
+    document.getElementById('btn-run-fresh').disabled = false;
+    document.getElementById('pipeline-running-msg').style.display = 'none';
+    loadPipelineStatus();
+  };
+}
+
+// ── Init ──────────────────────────────────────────────────────────────────────
+loadDashboard();
+</script>
+</body>
+</html>

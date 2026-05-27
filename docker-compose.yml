@@ -1,0 +1,37 @@
+version: "3.9"
+
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB:       rockwool_tracker
+      POSTGRES_USER:     postgres
+      POSTGRES_PASSWORD: password
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  api:
+    build: .
+    ports:
+      - "8000:8000"
+    env_file: .env
+    environment:
+      DATABASE_URL:      postgresql+asyncpg://postgres:password@db:5432/rockwool_tracker
+      SYNC_DATABASE_URL: postgresql://postgres:password@db:5432/rockwool_tracker
+      TRANSCRIPTS_DIR:   /app/data/raw_transcripts
+    volumes:
+      - ./data/raw_transcripts:/app/data/raw_transcripts:ro
+    depends_on:
+      db:
+        condition: service_healthy
+    command: uvicorn backend.main:app --host 0.0.0.0 --port 8000 --reload
+
+volumes:
+  pgdata:
