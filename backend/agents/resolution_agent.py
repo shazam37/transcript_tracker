@@ -1,7 +1,7 @@
 """
 ResolutionAgent: new transcript + open claims → resolution judgements.
 
-This is the most critical agent for the assignment's core requirement:
+This is the most critical agent for the core requirement:
 "Determines whether each claim materialized, partially materialized, didn't,
 or remains unresolvable."
 
@@ -23,7 +23,7 @@ Resolution taxonomy (designed for explainability at the interview):
                            has no measurable outcome. We close these to keep OPEN list clean.
 
 Batching strategy:
-  - Group open claims into batches of 15 (fits comfortably in Claude's context)
+  - Group open claims into batches of 15 (fits comfortably in LLMs context)
   - We send the full transcript management text + batch of claims in one call
   - Each batch is independent — no cross-batch dependencies
   - This scales linearly: 150 open claims = 10 API calls per transcript
@@ -35,15 +35,17 @@ Why not embed + similarity search to find relevant claims?
 """
 
 from __future__ import annotations
+import asyncio
 import json
 import re
 from typing import Optional
 
-from langchain_anthropic import ChatAnthropic
 from langchain_core.messages import SystemMessage, HumanMessage
+from ..utils.llm_config import get_llm
 
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select
+from sqlalchemy import select, insert
+from sqlalchemy.orm import selectinload
 
 from ..db.models import Claim, Evidence, ClaimAuditLog, ResolutionStatus, ClaimType
 
@@ -112,10 +114,12 @@ VALID_FINAL_STATUSES = {
 
 class ResolutionAgent:
     def __init__(self, api_key: Optional[str] = None):
-        kwargs = {"model": "claude-sonnet-4-6", "temperature": 0, "max_tokens": 4096}
-        if api_key:
-            kwargs["anthropic_api_key"] = api_key
-        self.llm = ChatAnthropic(**kwargs)
+        self.llm = get_llm(temperature=0, max_tokens=4096)
+
+    @staticmethod
+    def _is_rate_limit(exc: Exception) -> bool:
+        s = str(exc).lower()
+        return "429" in str(exc) or "rate_limit" in s or "rate limit" in s or "too many" in s
 
     def _build_mgmt_text(self, speech_blocks: list[dict], max_words: int = 4500) -> str:
         """Concatenate management speech blocks into a focused resolution context."""
@@ -147,7 +151,7 @@ class ResolutionAgent:
         except ValueError:
             return True
 
-    def _call_llm(
+    async def _call_llm(
         self,
         batch: list[dict],
         speech_blocks: list[dict],
@@ -184,19 +188,27 @@ class ResolutionAgent:
             )),
         ]
 
-        try:
-            resp = self.llm.invoke(messages)
-            raw  = resp.content.strip()
-            raw  = re.sub(r"```json\s*", "", raw)
-            raw  = re.sub(r"```\s*", "", raw)
-            data = json.loads(raw)
-            return data.get("resolutions", []), None
-        except json.JSONDecodeError as e:
-            return [], f"JSON parse error: {e}"
-        except Exception as e:
-            return [], f"LLM error: {e}"
+        last_err: Optional[str] = None
+        for attempt in range(4):
+            try:
+                resp = await self.llm.ainvoke(messages)
+                raw  = resp.content.strip()
+                raw  = re.sub(r"```json\s*", "", raw)
+                raw  = re.sub(r"```\s*", "", raw)
+                data = json.loads(raw)
+                return data.get("resolutions", []), None
+            except json.JSONDecodeError as e:
+                return [], f"JSON parse error: {e}"
+            except Exception as e:
+                last_err = f"LLM error: {e}"
+                if self._is_rate_limit(e) and attempt < 3:
+                    wait = 15 * (attempt + 1)  # 15s, 30s, 45s
+                    await asyncio.sleep(wait)
+                    continue
+                break
+        return [], last_err
 
-    def resolve(
+    async def resolve(
         self,
         open_claims: list[dict],
         speech_blocks: list[dict],
@@ -214,8 +226,10 @@ class ResolutionAgent:
 
         all_resolutions, errors = [], []
         for i in range(0, len(eligible), batch_size):
+            if i > 0:
+                await asyncio.sleep(2)  # throttle between batches
             batch = eligible[i : i + batch_size]
-            resolutions, err = self._call_llm(batch, speech_blocks, event_type, transcript_date)
+            resolutions, err = await self._call_llm(batch, speech_blocks, event_type, transcript_date)
             if err:
                 errors.append(err)
             else:
@@ -258,15 +272,10 @@ async def run_resolution_agent(state: dict, db: AsyncSession, agent: ResolutionA
         f"[ResolutionAgent] Checking {len(open_claims)} open claims against {event_type} ({transcript_date})"
     )
 
-    resolutions, errors = agent.resolve(
+    resolutions, errors = await agent.resolve(
         open_claims, speech_blocks, event_type, transcript_date
     )
     updates["resolution_errors"] = errors
-
-    # Fetch the source transcript for evidence FK
-    from ..db.models import Transcript
-    t_result = await db.execute(select(Transcript).where(Transcript.id == transcript_id))
-    transcript_row = t_result.scalar_one()
 
     resolved_count = 0
     for res in resolutions:
@@ -305,8 +314,11 @@ async def run_resolution_agent(state: dict, db: AsyncSession, agent: ResolutionA
         db.add(ev)
         await db.flush()
 
-        # Link evidence to claim
-        claim_row.evidence_list.append(ev)
+        # Link evidence to claim via direct join-table insert (avoids lazy load)
+        from ..db.models import claim_evidence
+        await db.execute(
+            claim_evidence.insert().values(claim_id=claim_row.id, evidence_id=ev.id)
+        )
 
         # Update claim
         claim_row.resolution_status    = ResolutionStatus(new_status)

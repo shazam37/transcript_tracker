@@ -141,6 +141,14 @@ def _parse_speech_blocks(
         "group","senior","chief","executive","relations","communications",
         "sustainability","operator","participant"
     }
+    # Words that indicate a corporate management role (not analyst or operator)
+    MGMT_TITLE_WORDS = {
+        "ceo", "cfo", "coo", "cto", "chairman", "president", "chief",
+        "officer", "director", "svp", "evp", "vp", "vice", "head",
+        "secretary", "general", "managing", "executive", "sustainability",
+        "relations", "communications"
+    }
+    ANALYST_WORDS = {"analyst", "research", "operator"}
 
     for section_name, section_text in sections:
         segments = _SEPARATOR.split(section_text)
@@ -161,10 +169,20 @@ def _parse_speech_blocks(
             speech_text = "\n".join(lines[text_start:]).strip()
             if len(speech_text.split()) < 20: continue
 
-            is_mgmt = any(
-                speaker_name.lower() in name or name in speaker_name.lower()
-                for name in mgmt_names
-            ) if speaker_name != "Unknown" else False
+            is_mgmt = False
+            if speaker_name != "Unknown":
+                # Primary: match against known corporate participant names
+                if mgmt_names:
+                    is_mgmt = any(
+                        speaker_name.lower() in name or name in speaker_name.lower()
+                        for name in mgmt_names
+                    )
+                # Fallback: infer from title when participant list is missing/incomplete
+                if not is_mgmt and speaker_title:
+                    tl = speaker_title.lower()
+                    has_mgmt_word = any(w in tl for w in MGMT_TITLE_WORDS)
+                    has_analyst_word = any(w in tl for w in ANALYST_WORDS)
+                    is_mgmt = has_mgmt_word and not has_analyst_word
 
             blocks.append(SpeechBlock(
                 speaker_name=speaker_name,

@@ -13,48 +13,41 @@ Why load open claims here (not in ResolutionAgent)?
 """
 
 from __future__ import annotations
-import json
-from datetime import datetime
 
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
+from sqlalchemy.orm import selectinload
 
-from ..db.models import Transcript, Claim, ResolutionStatus, ProcessingRun, RunStatus
+from ..db.models import Transcript, Claim, ResolutionStatus
 from ..ingestion.parser import parse_transcript
 
 
 async def run_ingest_agent(state: dict, db: AsyncSession) -> dict:
-    """
-    Node function for the LangGraph IngestAgent.
-    Reads: transcript_path, processing_order, run_id
-    Writes: transcript_id, transcript_date, event_type, speech_blocks, open_claims
-    """
-    updates: dict = {"agent_trace": []}
-
+    updates: dict = {"agent_trace": [], "extracted_claims": [], "extraction_errors": [],
+                     "resolutions": [], "resolution_errors": [], "audit_entries": []}
     try:
-        path  = state["transcript_path"]
-        order = state["processing_order"]
+        path   = state["transcript_path"]
+        order  = state["processing_order"]
         run_id = state["run_id"]
 
         updates["agent_trace"].append(f"[IngestAgent] Parsing {path}")
 
-        # Parse PDF
+        # ── 1. Parse PDF ──────────────────────────────────────────────────
         parsed = parse_transcript(path)
 
-        # Check if already processed
-        existing = await db.execute(
+        # ── 2. Persist transcript row (idempotent) ────────────────────────
+        existing = (await db.execute(
             select(Transcript).where(Transcript.filename == parsed.filename)
-        )
-        transcript_row = existing.scalar_one_or_none()
+        )).scalar_one_or_none()
 
-        if transcript_row is None:
+        if existing is None:
             transcript_row = Transcript(
                 filename=parsed.filename,
                 transcript_date=parsed.transcript_date,
                 event_type=parsed.event_type,
                 fiscal_period=parsed.fiscal_period,
                 processing_order=order,
-                full_text=parsed.full_text[:50000],  # cap at 50k chars
+                full_text=parsed.full_text[:50000],
                 speaker_metadata={
                     "corporate": parsed.corporate_participants,
                     "analysts":  parsed.analyst_participants,
@@ -62,41 +55,43 @@ async def run_ingest_agent(state: dict, db: AsyncSession) -> dict:
                 run_id=run_id,
             )
             db.add(transcript_row)
-            await db.flush()  # get the ID
+            await db.flush()  # assigns transcript_row.id
             updates["agent_trace"].append(
                 f"[IngestAgent] Persisted transcript id={transcript_row.id} "
                 f"date={parsed.transcript_date} event={parsed.event_type}"
             )
         else:
+            transcript_row = existing
             updates["agent_trace"].append(
-                f"[IngestAgent] Transcript already exists id={transcript_row.id}, skipping insert"
+                f"[IngestAgent] Already exists id={transcript_row.id}, skipping insert"
             )
 
-        # Snapshot currently OPEN claims BEFORE we process this transcript
-        # This is the walk-forward enforcement point
-        open_result = await db.execute(
-            select(Claim).where(Claim.resolution_status == ResolutionStatus.OPEN)
-        )
-        open_claims = open_result.scalars().all()
+        # ── 3. Snapshot OPEN claims (walk-forward enforcement) ────────────
+        # selectinload(Claim.transcript) avoids lazy-load MissingGreenlet hang.
+        open_claims_rows = (await db.execute(
+            select(Claim)
+            .where(Claim.resolution_status == ResolutionStatus.OPEN)
+            .options(selectinload(Claim.transcript))
+        )).scalars().all()
 
         open_claims_dicts = [
             {
-                "id":              c.id,
-                "speaker_name":    c.speaker_name,
-                "speaker_title":   c.speaker_title,
-                "raw_quote":       c.raw_quote,
-                "claim_summary":   c.claim_summary,
-                "claim_type":      c.claim_type.value,
-                "hedge_level":     c.hedge_level.value,
-                "timeframe":       c.timeframe,
-                "timeframe_date":  c.timeframe_date,
+                "id":             c.id,
+                "speaker_name":   c.speaker_name,
+                "speaker_title":  c.speaker_title,
+                "raw_quote":      c.raw_quote,
+                "claim_summary":  c.claim_summary,
+                "claim_type":     c.claim_type.value,
+                "hedge_level":    c.hedge_level.value,
+                "timeframe":      c.timeframe,
+                "timeframe_date": c.timeframe_date,
                 "transcript_date": c.transcript.transcript_date if c.transcript else None,
-                "tags":            c.tags or [],
+                "tags":           c.tags or [],
             }
-            for c in open_claims
+            for c in open_claims_rows
         ]
 
-        # Build speech blocks for extraction
+        # ── 4. Build speech block dicts ───────────────────────────────────
         speech_blocks = [
             {
                 "speaker_name":  b.speaker_name,
@@ -117,11 +112,14 @@ async def run_ingest_agent(state: dict, db: AsyncSession) -> dict:
             "open_claims":     open_claims_dicts,
         })
         updates["agent_trace"].append(
-            f"[IngestAgent] Loaded {len(open_claims_dicts)} open claims for resolution check"
+            f"[IngestAgent] {len(open_claims_dicts)} open claims snapshotted, "
+            f"{len(speech_blocks)} speech blocks ready"
         )
 
     except Exception as e:
+        import traceback
+        tb = traceback.format_exc()
         updates["error"] = f"IngestAgent failed: {e}"
-        updates["agent_trace"].append(f"[IngestAgent] ERROR: {e}")
+        updates["agent_trace"].append(f"[IngestAgent] ERROR: {e}\n{tb}")
 
     return updates

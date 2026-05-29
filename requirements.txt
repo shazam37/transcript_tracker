@@ -5,10 +5,15 @@ python-multipart>=0.0.9
 aiofiles>=23.2.1
 python-dotenv>=1.0.0
 
-# LangGraph + LangChain
+# LangGraph + LangChain core
 langgraph>=0.1.0
-langchain-anthropic>=0.1.0
 langchain-core>=0.2.0
+
+# LLM providers — all installed, only the one matching LLM_PROVIDER is used
+langchain-groq>=0.1.0
+langchain-anthropic>=0.1.0
+langchain-openai>=0.1.0
+# langchain-google-genai>=1.0.0
 
 # Database
 sqlalchemy[asyncio]>=2.0.0

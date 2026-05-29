@@ -141,6 +141,8 @@
   .log-done      { color: var(--green); font-weight: 700; }
   .log-error     { color: var(--red); }
   .log-rule      { color: var(--yellow); font-weight: 600; border-top: 1px solid var(--border); margin-top: 4px; padding-top: 4px; }
+  .log-thinking  { color: var(--muted); font-style: italic; animation: pulse 2s ease-in-out infinite; }
+  @keyframes pulse { 0%,100% { opacity: 0.5; } 50% { opacity: 1; } }
 
   /* Transcripts timeline */
   .transcript-list { display: flex; flex-direction: column; gap: 8px; }
@@ -328,6 +330,7 @@
 
       <div style="display:flex;gap:10px;margin-bottom:16px;align-items:center">
         <button class="btn" id="btn-run" onclick="startPipeline(false)">▶ Run Pipeline (Resume)</button>
+        <button class="btn btn-ghost" id="btn-run-demo" onclick="startPipeline(true, 5)" style="border-color:var(--yellow);color:var(--yellow)">⚡ Quick Demo (5 transcripts)</button>
         <button class="btn btn-ghost" id="btn-run-fresh" onclick="startPipeline(true)">↺ Reprocess All</button>
         <span id="pipeline-running-msg" style="color:var(--accent);font-size:13px;display:none">
           <span class="loader"></span> Processing…
@@ -699,6 +702,7 @@ async function loadPipelineStatus() {
     document.getElementById('p-pending').textContent   = s.pending;
     document.getElementById('p-status-val').textContent = s.is_running ? '🔄 Running' : (s.processed > 0 ? '✓ Idle' : '⏸ Not started');
     document.getElementById('btn-run').disabled        = s.is_running;
+    document.getElementById('btn-run-demo').disabled   = s.is_running;
     document.getElementById('btn-run-fresh').disabled  = s.is_running;
 
     const pct = s.total_transcripts > 0 ? (s.processed / s.total_transcripts) * 100 : 0;
@@ -735,77 +739,125 @@ async function loadRuns() {
   } catch(e) {}
 }
 
-function startPipeline(fresh) {
-  if (!confirm(fresh ? 'Reprocess ALL transcripts from scratch?' : 'Start pipeline (will resume from where it left off)?')) return;
+function startPipeline(fresh, max) {
+  const msg = max ? `Reprocess first ${max} transcripts from scratch (Quick Demo)?`
+            : fresh ? 'Reprocess ALL transcripts from scratch?'
+            : 'Start pipeline (will resume from where it left off)?';
+  if (!confirm(msg)) return;
 
   const logBox = document.getElementById('log-box');
   logBox.innerHTML = '';
   document.getElementById('btn-run').disabled = true;
+  document.getElementById('btn-run-demo').disabled = true;
   document.getElementById('btn-run-fresh').disabled = true;
   document.getElementById('pipeline-running-msg').style.display = 'flex';
+  document.getElementById('p-progress-wrap').style.display = 'block';
 
   let extracted = 0, resolved = 0;
+  let thinkingEl = null;
 
   const appendLog = (text, cls) => {
     const div = document.createElement('div');
-    div.className = 'log-line ' + cls;
+    div.className = 'log-line ' + (cls || '');
     div.textContent = text;
     logBox.appendChild(div);
     logBox.scrollTop = logBox.scrollHeight;
   };
 
-  const url = `${API}/pipeline/run?resume=${!fresh}`;
+  const setThinking = (text) => {
+    if (!thinkingEl) {
+      thinkingEl = document.createElement('div');
+      thinkingEl.className = 'log-line log-thinking';
+      logBox.appendChild(thinkingEl);
+    }
+    thinkingEl.textContent = text;
+    logBox.scrollTop = logBox.scrollHeight;
+  };
+
+  const clearThinking = () => {
+    if (thinkingEl) { thinkingEl.remove(); thinkingEl = null; }
+  };
+
+  const resetButtons = () => {
+    document.getElementById('btn-run').disabled = false;
+    document.getElementById('btn-run-demo').disabled = false;
+    document.getElementById('btn-run-fresh').disabled = false;
+    document.getElementById('pipeline-running-msg').style.display = 'none';
+    loadPipelineStatus();
+    loadRuns();
+  };
+
+  // Show active provider before connecting
+  fetch(`${API}/pipeline/status`).then(r => r.json()).then(s => {
+    appendLog(`Provider: ${s.llm?.provider || '?'} / ${s.llm?.model || '?'}`, 'log-trace');
+  }).catch(() => {});
+
+  // MUST be GET — EventSource does not support POST.
+  // A POST here causes immediate onerror + "Connection closed" with no data.
+  const url = `${API}/pipeline/run?resume=${!fresh}${max ? `&max=${max}` : ''}`;
   const es  = new EventSource(url);
 
   es.onmessage = (e) => {
     const evt = JSON.parse(e.data);
     const kind = evt.event;
 
-    if (kind === 'pipeline_start')    appendLog('▶ ' + (evt.message||'Pipeline started'), 'log-start');
-    else if (kind === 'pipeline_info') appendLog('  ' + (evt.message || `Total: ${evt.total_transcripts}`), 'log-trace');
+    if (kind === 'pipeline_start')
+      appendLog('▶ ' + (evt.message || 'Pipeline started'), 'log-start');
+    else if (kind === 'pipeline_info')
+      appendLog('  ' + (evt.message || `Total: ${evt.total_transcripts}`), 'log-trace');
     else if (kind === 'transcript_start') {
       appendLog(`\n── [${evt.index}/${evt.total}] ${evt.filename}`, 'log-rule');
       document.getElementById('p-processed').textContent = evt.index - 1;
-      const pct = evt.total > 0 ? ((evt.index-1)/evt.total)*100 : 0;
+      const pct = evt.total > 0 ? ((evt.index - 1) / evt.total) * 100 : 0;
       document.getElementById('p-progress-fill').style.width = pct + '%';
     }
-    else if (kind === 'agent_trace')   appendLog('  ' + evt.message, 'log-trace');
+    else if (kind === 'tick')
+      setThinking(`  ⏳ Processing [${evt.index}/${evt.total}]… ${evt.elapsed}s elapsed`);
+    else if (kind === 'agent_trace') {
+      clearThinking();
+      appendLog('  ' + evt.message, 'log-trace');
+    }
+    else if (kind === 'agent_error') {
+      clearThinking();
+      appendLog('  ⚠ ' + evt.message, 'log-error');
+    }
     else if (kind === 'claim_extracted') {
+      clearThinking();
       extracted++;
       appendLog(`  + [${evt.claim_type}] ${evt.speaker}: ${evt.summary}`, 'log-extracted');
     }
     else if (kind === 'claim_resolved') {
+      clearThinking();
       resolved++;
-      appendLog(`  ✓ #${evt.claim_id} → ${evt.new_status}: ${evt.reasoning?.slice(0,100)}`, 'log-resolved');
+      appendLog(`  ✓ #${evt.claim_id} → ${evt.new_status}: ${evt.reasoning?.slice(0, 100)}`, 'log-resolved');
     }
-    else if (kind === 'transcript_done')
-      appendLog(`  Done: ${evt.claims_extracted} extracted, ${evt.claims_resolved} resolved`, 'log-done');
-    else if (kind === 'transcript_error') appendLog('  ERROR: ' + evt.error, 'log-error');
+    else if (kind === 'transcript_done') {
+      clearThinking();
+      const errSuffix = evt.error_count ? `, ${evt.error_count} errors` : '';
+      appendLog(`  Done: ${evt.claims_extracted} extracted, ${evt.claims_resolved} resolved${errSuffix}`, 'log-done');
+    }
+    else if (kind === 'transcript_error')
+      appendLog('  ERROR: ' + evt.error, 'log-error');
     else if (kind === 'pipeline_done') {
       appendLog(`\n✓ Pipeline complete — ${extracted} extracted, ${resolved} resolved`, 'log-done');
-      es.close();
-      document.getElementById('btn-run').disabled = false;
-      document.getElementById('btn-run-fresh').disabled = false;
-      document.getElementById('pipeline-running-msg').style.display = 'none';
       document.getElementById('p-progress-fill').style.width = '100%';
-      loadPipelineStatus();
+      es.close();
+      resetButtons();
     }
     else if (kind === 'error') {
       appendLog('FATAL: ' + evt.message, 'log-error');
       es.close();
-      document.getElementById('btn-run').disabled = false;
-      document.getElementById('btn-run-fresh').disabled = false;
-      document.getElementById('pipeline-running-msg').style.display = 'none';
+      resetButtons();
     }
   };
 
   es.onerror = () => {
-    appendLog('Connection closed', 'log-trace');
-    es.close();
-    document.getElementById('btn-run').disabled = false;
-    document.getElementById('btn-run-fresh').disabled = false;
-    document.getElementById('pipeline-running-msg').style.display = 'none';
-    loadPipelineStatus();
+    // onerror fires when stream ends normally too — only flag if buttons still disabled
+    if (document.getElementById('btn-run').disabled) {
+      appendLog('Stream ended unexpectedly — check server logs', 'log-error');
+      es.close();
+      resetButtons();
+    }
   };
 }
 

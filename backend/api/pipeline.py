@@ -11,10 +11,8 @@ from __future__ import annotations
 import asyncio
 import json
 import os
-from datetime import datetime
-from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
+from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func, desc
@@ -25,7 +23,6 @@ from ..agents.pipeline import run_pipeline_streaming, TRANSCRIPTS_DIR
 
 router = APIRouter(prefix="/pipeline", tags=["pipeline"])
 
-# Simple in-memory lock — prevents concurrent pipeline runs
 _pipeline_running = False
 
 
@@ -37,49 +34,37 @@ async def pipeline_status(db: AsyncSession = Depends(get_db)):
 
     processed = (await db.execute(select(func.count(Transcript.id)))).scalar_one()
 
-    last_run_row = (await db.execute(
-        select(ProcessingRun)
-        .order_by(desc(ProcessingRun.run_started_at))
-        .limit(1)
+    last_run = (await db.execute(
+        select(ProcessingRun).order_by(desc(ProcessingRun.run_started_at)).limit(1)
     )).scalar_one_or_none()
 
+    from ..utils.llm_config import current_provider_info
     return {
         "total_transcripts": total_files,
         "processed":         processed,
         "pending":           max(0, total_files - processed),
         "is_running":        _pipeline_running,
-        "last_run_at":       last_run_row.run_started_at.isoformat() if last_run_row else None,
+        "last_run_at":       last_run.run_started_at.isoformat() if last_run else None,
+        "llm":               current_provider_info(),
     }
 
 
-@router.post("/run")
-async def run_pipeline(
-    resume: bool = True,
-    db: AsyncSession = Depends(get_db),
-):
+@router.get("/run")  # GET so EventSource works
+async def run_pipeline(resume: bool = True, max: int = 0):
     """
-    Stream the walk-forward pipeline as Server-Sent Events.
-    Each event is a JSON object with an "event" type field.
-
-    Event types:
-      pipeline_start    — pipeline beginning
-      pipeline_info     — metadata (total count, skip count)
-      transcript_start  — starting a transcript
-      agent_trace       — step-by-step agent reasoning
-      claim_extracted   — a new claim was found
-      claim_resolved    — an open claim was resolved
-      transcript_done   — transcript finished with stats
-      transcript_error  — transcript failed (non-fatal)
-      pipeline_done     — all transcripts complete
-      error             — fatal error
+    Stream walk-forward pipeline as Server-Sent Events.
+    EventSource requires GET — POST would silently fail in the browser.
     """
     global _pipeline_running
     if _pipeline_running:
         raise HTTPException(status_code=409, detail="Pipeline already running")
 
-    api_key = os.getenv("ANTHROPIC_API_KEY")
-    if not api_key:
-        raise HTTPException(status_code=500, detail="ANTHROPIC_API_KEY not set")
+    if not os.getenv("GROQ_API_KEY") and \
+       not os.getenv("ANTHROPIC_API_KEY") and \
+       not os.getenv("OPENAI_API_KEY") and \
+       not os.getenv("GOOGLE_API_KEY"):
+        raise HTTPException(status_code=500,
+            detail="No LLM API key set. Add GROQ_API_KEY (or other provider key) to .env")
 
     async def event_stream():
         global _pipeline_running
@@ -87,11 +72,11 @@ async def run_pipeline(
         try:
             async for line in run_pipeline_streaming(
                 transcripts_dir=TRANSCRIPTS_DIR,
-                api_key=api_key,
                 resume=resume,
+                max_transcripts=max if max > 0 else None,
             ):
                 yield f"data: {line}\n\n"
-                await asyncio.sleep(0)   # yield control to event loop
+                await asyncio.sleep(0)
         except Exception as e:
             yield f"data: {json.dumps({'event': 'error', 'message': str(e)})}\n\n"
         finally:
@@ -104,6 +89,7 @@ async def run_pipeline(
             "Cache-Control":               "no-cache",
             "X-Accel-Buffering":           "no",
             "Access-Control-Allow-Origin": "*",
+            "Connection":                  "keep-alive",
         },
     )
 

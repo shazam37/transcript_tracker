@@ -100,7 +100,7 @@ docker-compose up --build
 
 ---
 
-## Interview Discussion Points
+## Discussion Points
 
 ### Taxonomy & Hedged Language
 We track hedged_statement as its own type rather than discarding them. Rationale:

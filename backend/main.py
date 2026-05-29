@@ -12,6 +12,8 @@ Architecture overview:
   GET  /pipeline/runs     → history of processing runs
 """
 from __future__ import annotations
+import asyncio
+import logging
 import os
 from contextlib import asynccontextmanager
 
@@ -29,10 +31,21 @@ from .api.pipeline import router as pipeline_router
 from .api.transcripts import router as transcripts_router
 
 
+logger = logging.getLogger("uvicorn.error")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Create tables on startup (idempotent — safe to run every time)
-    await create_tables()
+    for attempt in range(1, 11):
+        try:
+            await create_tables()
+            break
+        except Exception as exc:
+            if attempt == 10:
+                raise
+            wait = min(2 ** (attempt - 1), 16)
+            logger.warning("DB not ready (attempt %d/10, retrying in %ds): %s", attempt, wait, exc)
+            await asyncio.sleep(wait)
     yield
 
 
@@ -64,7 +77,8 @@ app.include_router(transcripts_router, prefix="/api")
 # Health check
 @app.get("/api/health")
 async def health():
-    return {"status": "ok"}
+    from .utils.llm_config import current_provider_info
+    return {"status": "ok", "llm": current_provider_info()}
 
 
 # Serve frontend static files

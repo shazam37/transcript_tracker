@@ -2,7 +2,7 @@
 ExtractionAgent: management speech blocks → structured Claim objects.
 
 LLM Strategy:
-  - Model: claude-sonnet-4-6 (accuracy > speed for this task).or gpt-oss-120b (Open Source)
+  - Model: claude-sonnet-4-6 (accuracy > speed for this task) or GPT-OSS-120B
   - Temperature: 0 (reproducibility — same transcript should always produce same claims)
   - One API call per management speech block (not per transcript)
     WHY: shorter context = sharper focus = fewer hallucinated claims
@@ -32,12 +32,13 @@ We track hedged_statement + speculative separately because:
 """
 
 from __future__ import annotations
+import asyncio
 import json
 import re
 from typing import Optional
 
-from langchain_anthropic import ChatAnthropic
 from langchain_core.messages import SystemMessage, HumanMessage
+from ..utils.llm_config import get_llm
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -159,12 +160,15 @@ def _validate(raw: dict) -> Optional[dict]:
 
 class ExtractionAgent:
     def __init__(self, api_key: Optional[str] = None):
-        kwargs = {"model": "claude-sonnet-4-6", "temperature": 0, "max_tokens": 4096}
-        if api_key:
-            kwargs["anthropic_api_key"] = api_key
-        self.llm = ChatAnthropic(**kwargs)
+        # api_key arg kept for backwards compat but provider is read from env
+        self.llm = get_llm(temperature=0, max_tokens=4096)
 
-    def _call(self, block: dict, event_type: str, transcript_date: str) -> tuple[list[dict], Optional[str]]:
+    @staticmethod
+    def _is_rate_limit(exc: Exception) -> bool:
+        s = str(exc).lower()
+        return "429" in str(exc) or "rate_limit" in s or "rate limit" in s or "too many" in s
+
+    async def _call(self, block: dict, event_type: str, transcript_date: str) -> tuple[list[dict], Optional[str]]:
         """Single LLM call for one speech block. Returns (raw_claims, error)."""
         text = block["text"]
         words = text.split()
@@ -190,21 +194,33 @@ class ExtractionAgent:
                     speech_text=chunk,
                 )),
             ]
-            try:
-                resp = self.llm.invoke(messages)
-                raw  = resp.content.strip()
-                raw  = re.sub(r"```json\s*", "", raw)
-                raw  = re.sub(r"```\s*", "", raw)
-                data = json.loads(raw)
-                all_raw.extend(data.get("claims", []))
-            except json.JSONDecodeError as e:
-                return [], f"JSON parse error on block [{block['speaker_name']}]: {e}"
-            except Exception as e:
-                return [], f"LLM error on block [{block['speaker_name']}]: {e}"
+            last_err: Optional[str] = None
+            for attempt in range(4):  # up to 4 attempts: 0, 1, 2, 3
+                try:
+                    resp = await self.llm.ainvoke(messages)
+                    raw  = resp.content.strip()
+                    raw  = re.sub(r"```json\s*", "", raw)
+                    raw  = re.sub(r"```\s*", "", raw)
+                    data = json.loads(raw)
+                    all_raw.extend(data.get("claims", []))
+                    last_err = None
+                    break
+                except json.JSONDecodeError as e:
+                    last_err = f"JSON parse error on block [{block['speaker_name']}]: {e}"
+                    break  # JSON errors are not transient — don't retry
+                except Exception as e:
+                    last_err = f"LLM error on block [{block['speaker_name']}]: {e}"
+                    if self._is_rate_limit(e) and attempt < 3:
+                        wait = 15 * (attempt + 1)  # 15s, 30s, 45s — only if still rate limited
+                        await asyncio.sleep(wait)
+                        continue
+                    break
+            if last_err:
+                return [], last_err
 
         return all_raw, None
 
-    def extract_from_blocks(
+    async def extract_from_blocks(
         self,
         speech_blocks:  list[dict],
         event_type:     str,
@@ -222,7 +238,8 @@ class ExtractionAgent:
         for block in mgmt_blocks:
             if len(block["text"].split()) < 25:
                 continue
-            raw_claims, err = self._call(block, event_type, transcript_date)
+            await asyncio.sleep(1.5)  # ~30 req/min proactive throttle for Groq free tier
+            raw_claims, err = await self._call(block, event_type, transcript_date)
             if err:
                 errors.append(err)
                 continue
@@ -264,7 +281,7 @@ async def run_extraction_agent(state: dict, db: AsyncSession, agent: ExtractionA
             f"[ExtractionAgent] {len(speech_blocks)} blocks total, {mgmt_count} management"
         )
 
-        raw_claims, errors = agent.extract_from_blocks(
+        raw_claims, errors = await agent.extract_from_blocks(
             speech_blocks, event_type, transcript_date
         )
         updates["extraction_errors"] = errors

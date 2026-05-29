@@ -1,5 +1,9 @@
 version: "3.9"
 
+networks:
+  rockwool-net:
+    driver: bridge
+
 services:
   db:
     image: postgres:16-alpine
@@ -16,6 +20,8 @@ services:
       interval: 5s
       timeout: 5s
       retries: 10
+    networks:
+      - rockwool-net
 
   api:
     build: .
@@ -31,6 +37,10 @@ services:
     depends_on:
       db:
         condition: service_healthy
+    links:
+      - db
+    networks:
+      - rockwool-net
     command: uvicorn backend.main:app --host 0.0.0.0 --port 8000 --reload
 
 volumes:
